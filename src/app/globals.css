@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  background: radial-gradient(1200px 600px at 10% -10%, rgba(40,203,124,0.08), transparent 60%),
+              radial-gradient(900px 500px at 100% 0%, rgba(99,102,241,0.08), transparent 60%),
+              #0b0f1a;
+  color: #e5e7eb;
+  min-height: 100vh;
+}
+
+* { box-sizing: border-box; }
+
+.card {
+  @apply bg-panel/80 backdrop-blur border border-white/5 rounded-2xl p-5 shadow-lg;
+}
+
+.kpi-num {
+  @apply font-mono tabular-nums;
+}
+
+.scroll-fade::-webkit-scrollbar { width: 6px; height: 6px; }
+.scroll-fade::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 6px; }
