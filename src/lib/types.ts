@@ -1,13 +1,16 @@
-// Tipos basados en el OpenAPI spec de Wallet by BudgetBakers
+// Tipos basados en la respuesta real de la REST API de Wallet by BudgetBakers.
+// Los montos pueden venir como número crudo (mocks) o como objeto { value, currencyCode } (API real).
 export type RecordType = "income" | "expense";
+export type Money = number | string | { value: number | string; currencyCode?: string };
 
 export interface WalletRecord {
   id: string;
   accountId: string;
-  amount: number | string;       // amount original
-  baseAmount: number | string;   // convertido a moneda base
+  amount: Money;
+  baseAmount: Money;
   recordDate: string;            // ISO
   recordType: RecordType;
+  recordState?: string;          // "cleared", etc.
   note?: string;
   payee?: string;
   payer?: string;
@@ -24,11 +27,14 @@ export interface WalletAccount {
   name: string;
   accountType?: string;
   color?: string;
-  initialBalance?: number | string;
-  initialBaseBalance?: number | string;
+  initialBalance?: Money;
+  initialBaseBalance?: Money;
   archived?: boolean;
   excludeFromStats?: boolean;
   recordStats?: {
+    recordCount?: number;
+    recordDate?: { min?: string; max?: string };
+    createdAt?: { min?: string; max?: string };
     incomeBaseAmount?: number;
     expenseBaseAmount?: number;
   };
@@ -39,6 +45,7 @@ export interface WalletCategory {
   name: string;
   color?: string;
   iconName?: string;
+  envelopeId?: number;
   enabled?: boolean;
   archived?: boolean;
 }
@@ -46,7 +53,7 @@ export interface WalletCategory {
 export interface WalletBudget {
   id: string;
   name: string;
-  amount: number | string;
+  amount: Money;
   currencyCode?: string;
   startDate: string;
   endDate: string;
@@ -59,5 +66,8 @@ export interface WalletBudget {
 export const toNum = (v: unknown): number => {
   if (typeof v === "number") return v;
   if (typeof v === "string") return parseFloat(v) || 0;
+  if (v && typeof v === "object" && "value" in (v as Record<string, unknown>)) {
+    return toNum((v as Record<string, unknown>).value);
+  }
   return 0;
 };

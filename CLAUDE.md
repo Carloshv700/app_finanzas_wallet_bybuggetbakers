@@ -60,27 +60,50 @@ npm run build    # validación de typecheck + build de producción
 - Base URL: `https://rest.budgetbakers.com/wallet`
 - Auth: `Authorization: Bearer <jwt>` (Premium only, BETA)
 - Docs: https://rest.budgetbakers.com/wallet/openapi/ui
-- Endpoints usados:
-  - `GET /v1/api/records` — transacciones (filtros con prefijos: `gte.`, `lte.`, `eq.`, `contains.`)
-  - `GET /v1/api/accounts`
-  - `GET /v1/api/categories`
-  - `GET /v1/api/budgets`
-- Campos clave de `Record`: `recordType` (`income` | `expense`), `baseAmount` (en moneda base — usar este, no `amount`), `recordDate` (ISO), `categoryId`, `accountId`
+- Endpoints usados: `/v1/api/records`, `/accounts`, `/categories`, `/budgets`
 - Rate limit: 500 req/hora (headers `X-RateLimit-*`)
-- Algunos endpoints devuelven `[]` directo, otros `{ data: [] }` — el cliente normaliza ambos
+
+**Forma real de las respuestas** (descubierto en pruebas, no documentado obviamente):
+- Cada endpoint envuelve los items bajo una key específica: `{ accounts: [...] }`, `{ categories: [...] }`, `{ budgets: [...] }`, `{ records: [...] }` — más `limit`, `offset`, `nextOffset`. El helper `unwrap()` en `wallet.ts` extrae el array correcto por endpoint.
+- **Los montos son objetos**, no números: `amount: { value: -52056, currencyCode: "COP" }`. Lo mismo `baseAmount`, `initialBalance`, `initialBaseBalance`. El helper `toNum()` en `types.ts` extrae `.value` automáticamente.
+- Records de gasto tienen `value` **negativo** (ej. `-52056`). El código siempre usa `Math.abs()` antes de sumar.
+
+**Límites duros del endpoint `/records`:**
+- Sin `lt` explícito → la API auto-acota a 3 meses desde `gte`. Si pides 12 meses solo te llegan los primeros 3.
+- Rango explícito `gte.<a>,lt.<b>` → máximo **370 días**. Más que eso devuelve `400 Invalid recordDate range`.
+- Solución: `wallet.ts` chunkea automáticamente en pedazos de 90 días con `Promise.all`, dedupea por `id`. Si necesitás cambiar el rango total, el chunking lo maneja transparentemente.
+
+**Identificar transferencias entre cuentas del usuario:**
+- Marcador estable: `category.envelopeId === 20001` (no depende del idioma del usuario ni del nombre custom).
+- Wallet guarda transferencias como un **par de records** (income en cuenta receptora + expense en cuenta emisora) — si los contás como ingreso/gasto se duplica todo. `analytics.ts` filtra estos en KPIs, trend, top categorías y presupuestos.
+- Para `totalBalance` NO se filtran (vienen en pares y se cancelan solas).
+
+**Balance actual por cuenta:**
+- La API **no expone** un campo `currentBalance`. Solo `initialBalance` + necesitás todos los records históricos.
+- `route.ts` usa `accounts[].recordStats.recordDate.min` como punto de partida del fetch, garantizando que se traigan todos los records que afectan el saldo (cuentas viejas como tarjetas de crédito pueden tener años de historia).
 
 ## Cómo funciona el contador idle (lo más importante)
 
-`IdleCounter.tsx` corre un `setInterval` a 30 fps y calcula:
+**Modelo conceptual:**
+- **Ancla** = `incomeRealMTD` (o expense, o net) que viene del server. Fuente de verdad real, no se modifica.
+- **Bump visual** = acumulador local que crece cada segundo. 100% cosmético, no toca ningún dato persistente.
+- **Valor mostrado** = `ancla + bump`.
 
-```ts
-incomeSimulado = incomeLastMonth * (msTranscurridosDelMes / msTotalDelMes)
-incomeMostrado = Math.max(incomeSimulado, incomeRealMTD)
-```
+**Tick:**
+- Siempre cada 1 segundo, sin importar el rate elegido.
+- Cada tick suma `incrementPerSecond = (baselineMonthly × 1000ms) / msDelMes` al bump y emite un floater "+$X".
+- `baselineMonthly` viene del promedio de los últimos 12 meses (campo `incomeMonthlyAvg` / `expenseMonthlyAvg` en `idle`), excluyendo transferencias y dividido por meses con datos (max 12).
 
-**Reconciliación**: si el ingreso real acumulado este mes ya supera al simulado, ese manda. Así el contador nunca pega saltos hacia abajo cuando llega plata real, y al final del mes converge con la realidad.
+**Selector seg/min/hora** (chips superior derecha):
+- Solo cambia el texto de la etiqueta "Ritmo: $X / unidad". El ticking visual sigue siendo cada segundo.
+- El display rate = `incrementPerSecond × multiplier` (1 / 60 / 3600).
 
-Source of truth está en `analytics.ts` → `buildSummary()` → campo `idle`.
+**Reset del bump al ancla** cuando:
+- Cambia el ancla (refetch del server cada 5 min, o reload de página).
+- Cambia el modo (Ingreso / Gasto / Balance).
+- (NO se resetea al cambiar seg/min/hora porque no afecta el ticking.)
+
+Source of truth está en `analytics.ts` → `buildSummary()` → campo `idle`. La ventana del promedio (`AVG_WINDOW_MONTHS = 12`) es constante en código.
 
 ## Sistema de alertas (en `analytics.ts`)
 

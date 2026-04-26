@@ -40,6 +40,41 @@ async function get<T>(path: string, query: Record<string, string | number | unde
   return res.json() as Promise<T>;
 }
 
+// La API real envuelve los arrays bajo una key específica por endpoint:
+// /accounts -> { accounts: [...] }, /records -> { records: [...] }, etc.
+function unwrap<T>(res: unknown, key: string): T[] {
+  if (Array.isArray(res)) return res as T[];
+  const obj = res as Record<string, unknown> | null;
+  if (!obj) return [];
+  if (Array.isArray(obj[key])) return obj[key] as T[];
+  if (Array.isArray(obj.data)) return obj.data as T[];
+  return [];
+}
+
+// La API limita: (a) sin lt explícito devuelve solo 3 meses desde gte, (b) con rango explícito
+// rechaza queries > 370 días. Para fetches largos (ej. 13 meses) chunkeamos en pedazos de 90 días.
+const CHUNK_DAYS = 90;
+const PAGE_SIZE = 200;
+
+async function fetchRecordsInRange(fromIso: string, toIso: string): Promise<WalletRecord[]> {
+  const all: WalletRecord[] = [];
+  let offset = 0;
+  while (true) {
+    const page = await get<unknown>("/v1/api/records", {
+      limit: PAGE_SIZE,
+      offset,
+      recordDate: `gte.${fromIso},lt.${toIso}`,
+      sortBy: "-recordDate",
+    });
+    const items = unwrap<WalletRecord>(page, "records");
+    all.push(...items);
+    if (items.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+    if (offset > 5000) break; // tope de seguridad por chunk
+  }
+  return all;
+}
+
 // Endpoints
 export async function getRecords(opts: { limit?: number; from?: string; to?: string } = {}): Promise<WalletRecord[]> {
   if (useMock()) {
@@ -49,46 +84,43 @@ export async function getRecords(opts: { limit?: number; from?: string; to?: str
     if (opts.limit) recs = recs.slice(0, opts.limit);
     return recs;
   }
-  // La API soporta filtros range con prefijo gte./lte.
-  const recordDate =
-    opts.from && opts.to ? `gte.${opts.from},lte.${opts.to}` :
-    opts.from            ? `gte.${opts.from}` :
-    opts.to              ? `lte.${opts.to}`   : undefined;
 
-  // Paginación: el endpoint devuelve hasta 200. Para finanzas personales suele alcanzar.
-  const all: WalletRecord[] = [];
-  let offset = 0;
-  const pageSize = 200;
-  while (true) {
-    const page = await get<WalletRecord[] | { data: WalletRecord[] }>("/v1/api/records", {
-      limit: pageSize,
-      offset,
-      recordDate,
-      sortBy: "-recordDate",
+  const fromDate = opts.from ? new Date(opts.from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const toDate = opts.to ? new Date(opts.to) : new Date();
+  const chunkMs = CHUNK_DAYS * 24 * 60 * 60 * 1000;
+
+  // Trae cada chunk de 90 días en paralelo (rate limit es 500/h, sobra holgura).
+  const chunks: Array<{ from: string; to: string }> = [];
+  for (let t = fromDate.getTime(); t < toDate.getTime(); t += chunkMs) {
+    chunks.push({
+      from: new Date(t).toISOString(),
+      to: new Date(Math.min(t + chunkMs, toDate.getTime())).toISOString(),
     });
-    const items = Array.isArray(page) ? page : page.data ?? [];
-    all.push(...items);
-    if (items.length < pageSize) break;
-    offset += pageSize;
-    if (offset > 5000 || (opts.limit && all.length >= opts.limit)) break; // tope de seguridad
   }
+  const chunkResults = await Promise.all(chunks.map(c => fetchRecordsInRange(c.from, c.to)));
+
+  // Dedupe por id (los chunks no se solapan, pero por si acaso).
+  const dedup = new Map<string, WalletRecord>();
+  for (const list of chunkResults) for (const r of list) dedup.set(r.id, r);
+  const all = Array.from(dedup.values());
+
   return opts.limit ? all.slice(0, opts.limit) : all;
 }
 
 export async function getAccounts(): Promise<WalletAccount[]> {
   if (useMock()) return MOCK_ACCOUNTS;
-  const res = await get<WalletAccount[] | { data: WalletAccount[] }>("/v1/api/accounts");
-  return Array.isArray(res) ? res : res.data ?? [];
+  const res = await get<unknown>("/v1/api/accounts");
+  return unwrap<WalletAccount>(res, "accounts");
 }
 
 export async function getCategories(): Promise<WalletCategory[]> {
   if (useMock()) return MOCK_CATEGORIES;
-  const res = await get<WalletCategory[] | { data: WalletCategory[] }>("/v1/api/categories");
-  return Array.isArray(res) ? res : res.data ?? [];
+  const res = await get<unknown>("/v1/api/categories");
+  return unwrap<WalletCategory>(res, "categories");
 }
 
 export async function getBudgets(): Promise<WalletBudget[]> {
   if (useMock()) return MOCK_BUDGETS;
-  const res = await get<WalletBudget[] | { data: WalletBudget[] }>("/v1/api/budgets");
-  return Array.isArray(res) ? res : res.data ?? [];
+  const res = await get<unknown>("/v1/api/budgets");
+  return unwrap<WalletBudget>(res, "budgets");
 }

@@ -52,9 +52,10 @@ export interface DashboardSummary {
   alerts: Alert[];
   // Para el contador idle:
   idle: {
-    incomeLastMonth: number;       // total ingresos mes pasado (base)
-    expenseLastMonth: number;      // total gastos mes pasado (base)
-    incomePerSecond: number;       // = incomeLastMonth / segundosDelMesActual
+    incomeMonthlyAvg: number;      // promedio mensual de ingresos (últimos 12 meses, sin transfers)
+    expenseMonthlyAvg: number;     // promedio mensual de gastos (últimos 12 meses, sin transfers)
+    monthsInAvg: number;           // meses con datos usados en el promedio (max 12)
+    incomePerSecond: number;       // = incomeMonthlyAvg / segundosDelMesActual
     expensePerSecond: number;
     netPerSecond: number;
     monthStartIso: string;         // inicio del mes actual (UTC)
@@ -73,10 +74,18 @@ const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1);
 const endOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
 const daysIn = (d: Date) => new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
 
+// BudgetBakers marca transferencias entre cuentas del usuario con envelopeId 20001.
+// Vienen en pares (income en una cuenta + expense en otra) y NO son ingreso/gasto real.
+// Se excluyen de KPIs, trend, top categorías y presupuestos. Sí se incluyen en totalBalance
+// porque al venir en pares se cancelan solas y mantienen el saldo correcto.
+const TRANSFER_ENVELOPE_ID = 20001;
+const isTransfer = (r: WalletRecord) => r.category?.envelopeId === TRANSFER_ENVELOPE_ID;
+
 function summarizeMonth(records: WalletRecord[], anchor: Date): MonthSummary {
   const start = startOfMonth(anchor);
   const end = endOfMonth(anchor);
   const inMonth = records.filter(r => {
+    if (isTransfer(r)) return false;
     const d = new Date(r.recordDate);
     return d >= start && d <= end;
   });
@@ -132,6 +141,7 @@ export function buildSummary(
     buckets[key] = { income: 0, expense: 0 };
   }
   for (const r of records) {
+    if (isTransfer(r)) continue;
     const d = new Date(r.recordDate);
     if (d < start || d > end) continue;
     const key = r.recordDate.slice(0, 10);
@@ -151,6 +161,7 @@ export function buildSummary(
   // Top categorías (gastos del mes actual)
   const catMap = new Map<string, CategoryAgg>();
   const expensesThisMonth = records.filter(r => {
+    if (isTransfer(r)) return false;
     const d = new Date(r.recordDate);
     return r.recordType === "expense" && d >= start && d <= end;
   });
@@ -244,14 +255,35 @@ export function buildSummary(
     });
   }
 
+  // Promedio mensual sobre los últimos 12 meses completos (excluye mes en curso y transferencias).
+  // Dividimos por meses con datos para no subestimar si el usuario tiene <12 meses de historia.
+  const AVG_WINDOW_MONTHS = 12;
+  const avgEnd = startOfMonth(thisAnchor); // exclusivo: hasta el inicio del mes actual
+  const avgStart = new Date(thisAnchor.getFullYear(), thisAnchor.getMonth() - AVG_WINDOW_MONTHS, 1);
+  let avgIncomeSum = 0, avgExpenseSum = 0;
+  const monthsWithDataSet = new Set<string>();
+  for (const r of records) {
+    if (isTransfer(r)) continue;
+    const d = new Date(r.recordDate);
+    if (d < avgStart || d >= avgEnd) continue;
+    const v = Math.abs(toNum(r.baseAmount ?? r.amount));
+    if (r.recordType === "income") avgIncomeSum += v;
+    else avgExpenseSum += v;
+    monthsWithDataSet.add(r.recordDate.slice(0, 7));
+  }
+  const monthsInAvg = Math.max(1, Math.min(AVG_WINDOW_MONTHS, monthsWithDataSet.size));
+  const incomeMonthlyAvg = avgIncomeSum / monthsInAvg;
+  const expenseMonthlyAvg = avgExpenseSum / monthsInAvg;
+
   // Idle counter source-of-truth
   const monthSeconds = days * 24 * 60 * 60;
   const idle = {
-    incomeLastMonth: lastMonth.income,
-    expenseLastMonth: lastMonth.expense,
-    incomePerSecond: lastMonth.income / monthSeconds,
-    expensePerSecond: lastMonth.expense / monthSeconds,
-    netPerSecond: (lastMonth.income - lastMonth.expense) / monthSeconds,
+    incomeMonthlyAvg,
+    expenseMonthlyAvg,
+    monthsInAvg,
+    incomePerSecond: incomeMonthlyAvg / monthSeconds,
+    expensePerSecond: expenseMonthlyAvg / monthSeconds,
+    netPerSecond: (incomeMonthlyAvg - expenseMonthlyAvg) / monthSeconds,
     monthStartIso: start.toISOString(),
     monthEndIso: end.toISOString(),
     nowIso: now.toISOString(),

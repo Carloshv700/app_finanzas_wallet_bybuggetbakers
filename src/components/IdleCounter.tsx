@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { formatMoney } from "@/lib/analytics";
 import { TrendingUp, TrendingDown, Coins, Zap } from "lucide-react";
 
@@ -9,27 +9,25 @@ type Rate = "second" | "minute" | "hour";
 
 interface Props {
   baseCurrency: string;
-  incomeLastMonth: number;       // ingreso total del mes pasado
-  expenseLastMonth: number;      // gasto total del mes pasado
+  incomeMonthlyAvg: number;       // promedio mensual ingresos (últimos 12 meses)
+  expenseMonthlyAvg: number;      // promedio mensual gastos (últimos 12 meses)
+  monthsInAvg: number;            // cuántos meses se promediaron (max 12)
   monthStartIso: string;
   monthEndIso: string;
-  incomeRealMTD: number;         // ingreso real acumulado este mes (lo conocido)
+  incomeRealMTD: number;
   expenseRealMTD: number;
 }
 
-/**
- * Idea: simulamos lo que llevarías acumulado a esta hora exacta del mes
- * extrapolando linealmente los totales del mes pasado.
- * El número crece en tiempo real (60fps tipo idle game) pero la cifra base es real.
- *
- * "Reconciliación con la realidad":
- *  - Si tu ingreso real MTD ya supera al simulado linealmente -> usamos el real (no le quitamos plata).
- *  - Visualmente mostramos un "anchor" cada vez que llega un ingreso/gasto real.
- */
+// El contador siempre tickea cada segundo. El rate solo cambia cómo se muestra el "Ritmo".
+const TICK_MS = 1_000;
+const RATE_MULTIPLIER: Record<Rate, number> = { second: 1, minute: 60, hour: 3_600 };
+const RATE_LABEL: Record<Rate, string> = { second: "seg", minute: "min", hour: "hora" };
+
 export default function IdleCounter({
   baseCurrency,
-  incomeLastMonth,
-  expenseLastMonth,
+  incomeMonthlyAvg,
+  expenseMonthlyAvg,
+  monthsInAvg,
   monthStartIso,
   monthEndIso,
   incomeRealMTD,
@@ -37,64 +35,64 @@ export default function IdleCounter({
 }: Props) {
   const [mode, setMode] = useState<Mode>("income");
   const [rate, setRate] = useState<Rate>("second");
-  const [tick, setTick] = useState(0);
+  // Acumulador puramente visual. Se resetea al recargar, refetch del server o cambiar modo/rate.
+  const [visualBump, setVisualBump] = useState(0);
+  const [floats, setFloats] = useState<{ id: number; v: number; x: number }[]>([]);
+  const [now, setNow] = useState(() => Date.now());
+
   const monthStart = useMemo(() => new Date(monthStartIso).getTime(), [monthStartIso]);
   const monthEnd = useMemo(() => new Date(monthEndIso).getTime(), [monthEndIso]);
   const totalMs = monthEnd - monthStart;
 
-  // Animación: 30 fps es suficiente para que se vea fluido sin quemar CPU.
+  // Ancla = valor real desde el server (single source of truth).
+  const anchor =
+    mode === "income"  ? incomeRealMTD :
+    mode === "expense" ? expenseRealMTD :
+    incomeRealMTD - expenseRealMTD;
+
+  const baselineMonthly =
+    mode === "income"  ? incomeMonthlyAvg :
+    mode === "expense" ? expenseMonthlyAvg :
+    incomeMonthlyAvg - expenseMonthlyAvg;
+
+  // Cuánto "gana" por segundo (siempre por segundo, sin importar el rate elegido).
+  const incrementPerSecond = totalMs > 0 ? (baselineMonthly * TICK_MS) / totalMs : 0;
+  // Lo que se muestra en la etiqueta "Ritmo: X / {unidad}" — solo display.
+  const displayRate = incrementPerSecond * RATE_MULTIPLIER[rate];
+
+  // Reset del bump visual cuando: cambia el ancla (refetch/reload) o modo.
+  // No reseteamos al cambiar rate porque el ticking visual no se ve afectado.
   useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 33);
+    setVisualBump(0);
+    setFloats([]);
+  }, [incomeRealMTD, expenseRealMTD, mode]);
+
+  // Tick: cada segundo sumamos el incremento por segundo y emitimos un floater.
+  useEffect(() => {
+    if (!Number.isFinite(incrementPerSecond) || incrementPerSecond === 0) return;
+    const id = setInterval(() => {
+      setVisualBump(b => b + incrementPerSecond);
+      const fid = Date.now() + Math.random();
+      setFloats(prev => [
+        ...prev.slice(-5),
+        { id: fid, v: incrementPerSecond, x: 30 + Math.random() * 40 },
+      ]);
+      setTimeout(() => setFloats(prev => prev.filter(f => f.id !== fid)), 1200);
+    }, TICK_MS);
+    return () => clearInterval(id);
+  }, [incrementPerSecond]);
+
+  // Para la barra de progreso del mes (1 update/seg, no afecta el contador).
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-
-  const now = Date.now();
   const elapsedMs = Math.max(0, Math.min(totalMs, now - monthStart));
   const ratio = totalMs > 0 ? elapsedMs / totalMs : 0;
 
-  const incomeSim = incomeLastMonth * ratio;
-  const expenseSim = expenseLastMonth * ratio;
-
-  // Reconciliación: si lo real va más alto, ese manda.
-  const incomeShown = Math.max(incomeSim, incomeRealMTD);
-  const expenseShown = Math.max(expenseSim, expenseRealMTD);
-  const netShown = incomeShown - expenseShown;
-
-  const value = mode === "income" ? incomeShown : mode === "expense" ? expenseShown : netShown;
-
-  // Ratio mostrado en la chip
-  const perSecond =
-    mode === "income" ? incomeLastMonth / (totalMs / 1000) :
-    mode === "expense" ? expenseLastMonth / (totalMs / 1000) :
-    (incomeLastMonth - expenseLastMonth) / (totalMs / 1000);
-  const ratePerUnit =
-    rate === "second" ? perSecond :
-    rate === "minute" ? perSecond * 60 :
-    perSecond * 3600;
-
-  // Flotantes "+$X" tipo idle game cada vez que el contador "incrementa visiblemente"
-  const lastFloatRef = useRef(0);
-  const [floats, setFloats] = useState<{ id: number; v: number; x: number }[]>([]);
-  useEffect(() => {
-    const interval = mode === "expense" ? 800 : 600;
-    if (Date.now() - lastFloatRef.current < interval) return;
-    lastFloatRef.current = Date.now();
-    const inc = ratePerUnit / (rate === "second" ? 1 : rate === "minute" ? 60 : 3600);
-    const visualBump =
-      rate === "second" ? inc * 0.6 :
-      rate === "minute" ? inc / 60 * 0.6 :
-                          inc / 3600 * 0.6;
-    if (visualBump > 0) {
-      const id = Date.now();
-      setFloats(prev => [
-        ...prev.slice(-6),
-        { id, v: visualBump, x: 30 + Math.random() * 40 },
-      ]);
-      setTimeout(() => setFloats(prev => prev.filter(f => f.id !== id)), 1200);
-    }
-  }, [tick, mode, rate, ratePerUnit]);
-
-  const accent = mode === "expense" ? "text-danger" : mode === "net" && netShown < 0 ? "text-danger" : "text-accent";
+  const value = anchor + visualBump;
+  const isOutflow = mode === "expense" || (mode === "net" && incrementPerSecond < 0);
+  const accent = isOutflow || (mode === "net" && value < 0) ? "text-danger" : "text-accent";
   const ringClass = mode === "expense"
     ? "ring-2 ring-danger/30"
     : "ring-2 ring-accent/30 animate-pulseGlow";
@@ -110,7 +108,7 @@ export default function IdleCounter({
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
           <Zap size={14} />
-          <span>Tiempo real · estimado lineal del mes pasado</span>
+          <span>Tiempo real · proyección sobre promedio últimos {monthsInAvg} {monthsInAvg === 1 ? "mes" : "meses"}</span>
         </div>
         <div className="flex gap-1 text-xs">
           {(["second","minute","hour"] as Rate[]).map(r => (
@@ -147,13 +145,13 @@ export default function IdleCounter({
           {formatMoney(value, baseCurrency)}
         </div>
 
-        {/* flotantes idle */}
+        {/* flotantes idle: aparecen en cada tick del rate */}
         <div className="absolute inset-0 pointer-events-none">
           {floats.map(f => (
             <div key={f.id}
-              className={`absolute top-2 text-sm font-semibold ${mode === "expense" ? "text-danger" : "text-accent"} animate-floatUp`}
+              className={`absolute top-2 text-sm font-semibold ${isOutflow ? "text-danger" : "text-accent"} animate-floatUp`}
               style={{ left: `${f.x}%` }}>
-              {mode === "expense" ? "-" : "+"}{formatMoney(Math.abs(f.v), baseCurrency)}
+              {isOutflow ? "-" : "+"}{formatMoney(Math.abs(f.v), baseCurrency)}
             </div>
           ))}
         </div>
@@ -161,10 +159,10 @@ export default function IdleCounter({
 
       <div className="mt-3 flex items-center justify-between text-sm">
         <span className="text-muted">
-          Ritmo: <span className="text-white font-mono">{formatMoney(ratePerUnit, baseCurrency)}</span> / {rate === "second" ? "seg" : rate === "minute" ? "min" : "hora"}
+          Ritmo: <span className="text-white font-mono">{formatMoney(displayRate, baseCurrency)}</span> / {RATE_LABEL[rate]}
         </span>
         <span className="text-muted">
-          Mes pasado: <span className="text-white font-mono">{formatMoney(mode === "income" ? incomeLastMonth : mode === "expense" ? expenseLastMonth : (incomeLastMonth - expenseLastMonth), baseCurrency)}</span>
+          Promedio mensual: <span className="text-white font-mono">{formatMoney(baselineMonthly, baseCurrency)}</span>
         </span>
       </div>
 
@@ -178,7 +176,7 @@ export default function IdleCounter({
         </div>
         <div className="mt-1 flex justify-between text-[11px] text-muted font-mono">
           <span>{(ratio * 100).toFixed(2)}% del mes</span>
-          <span>real MTD: {formatMoney(mode === "income" ? incomeRealMTD : mode === "expense" ? expenseRealMTD : (incomeRealMTD - expenseRealMTD), baseCurrency)}</span>
+          <span>real MTD: {formatMoney(anchor, baseCurrency)}</span>
         </div>
       </div>
     </div>

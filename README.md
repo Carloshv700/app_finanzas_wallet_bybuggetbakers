@@ -5,7 +5,7 @@ Webapp personal de finanzas que consume la **REST API de Wallet by BudgetBakers*
 ## ¿Qué hace?
 
 - **Dashboard** con saldo total, ingresos vs gastos, balance neto y comparativo vs mes anterior.
-- **Contador idle gamificado** ⚡: muestra tu ingreso/gasto del mes en tiempo real, extrapolando linealmente lo del mes pasado y reconciliándose con la data real cuando llegan transacciones nuevas. Cambias entre `$/seg`, `$/min`, `$/hora`.
+- **Contador idle gamificado** ⚡: arranca en tu ingreso/gasto real del mes y sube cada segundo proporcional al promedio de tus últimos 12 meses. Cambias entre `$/seg`, `$/min`, `$/hora` (solo cambia la etiqueta — el ticking visual es siempre por segundo).
 - **Alertas inteligentes**:
   - Categoría supera el presupuesto (≥80% = warning, ≥100% = danger).
   - Gasto inusual hoy (>2× el promedio diario del mes pasado).
@@ -90,16 +90,11 @@ src/
 ## Cómo funciona el contador idle
 
 1. Al cargar el dashboard, el endpoint `/api/summary` calcula:
-   - `incomeLastMonth` y `expenseLastMonth` (totales reales del mes anterior)
-   - `incomePerSecond = incomeLastMonth / segundos del mes actual`
-   - `incomeRealMTD` (lo realmente acumulado este mes hasta hoy)
-2. El componente `<IdleCounter />` corre un `setInterval` a 30 fps y calcula:
-   ```ts
-   incomeSimulado = incomeLastMonth * (msTranscurridosDelMes / msTotalDelMes)
-   incomeMostrado = max(incomeSimulado, incomeRealMTD)
-   ```
-3. Cuando llega un ingreso real que ya superaba la simulación, el contador se "reconcilia" sin saltos hacia abajo (siempre crece).
-4. Al final del mes, lo simulado y lo real convergen.
+   - `incomeMonthlyAvg` y `expenseMonthlyAvg` = promedio mensual sobre los últimos 12 meses (excluyendo transferencias entre tus propias cuentas).
+   - `incomeRealMTD` = lo realmente acumulado este mes hasta ahora (el ancla).
+2. El componente `<IdleCounter />` arranca el número en `incomeRealMTD` y cada segundo le suma `(monthlyAvg × 1seg) / segundosTotalesDelMes`. Es 100% visual — no toca ningún dato persistente.
+3. Al recargar la página, cambiar de modo (Ingreso/Gasto/Balance), o cuando el server refresca data (cada 5 min), el contador vuelve al ancla real.
+4. Los botones `/seg`, `/min`, `/hora` solo cambian cómo se muestra el ritmo en la etiqueta — el ticking visual del número grande es siempre por segundo.
 
 ## Deploy a Vercel
 
@@ -114,7 +109,8 @@ npx vercel
 
 ## Limitaciones conocidas
 
-- La API es **BETA** y requiere Premium — Anthropic puede cambiar endpoints/respuestas sin aviso.
-- El cliente normaliza tanto `Array<...>` como `{ data: Array<...> }` por si la API devuelve formatos distintos.
-- Saldo total se calcula como `Σ initialBaseBalance + Σ records.baseAmount`. Si tienes muchas cuentas archivadas con saldos viejos puede no coincidir 1:1 con la app oficial.
-- El idle counter asume que tu ingreso del mes pasado es un buen estimador — si tuviste un mes atípico el ritmo se verá raro hasta que llegue plata real.
+- La API es **BETA** y requiere Premium — BudgetBakers puede cambiar endpoints/respuestas sin aviso.
+- La API tiene dos límites duros en `/records`: máximo **370 días** por query, y si no especificás un `lt` te limita a 3 meses desde el `gte`. El cliente automáticamente chunkea fetches largos en pedazos de 90 días en paralelo.
+- **Transferencias entre tus cuentas** se identifican por `category.envelopeId === 20001` y se excluyen de KPIs/trend/categorías para no duplicar (Wallet las guarda como par income+expense). Sí cuentan en el saldo total porque vienen en pares y se cancelan.
+- Saldo total se calcula como `Σ initialBaseBalance + Σ records.baseAmount`. Para que coincida con Wallet, fetcheamos records desde la fecha más antigua de cualquier cuenta (no solo los últimos 12 meses). Tarjetas de crédito viejas pueden tener años de historia.
+- El idle counter usa el promedio de los últimos 12 meses como tasa esperada. Si tenés <12 meses de data, divide por los meses con datos para no subestimar.

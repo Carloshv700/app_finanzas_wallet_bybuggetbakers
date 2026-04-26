@@ -83,8 +83,9 @@ export default function Home() {
       <section className="mb-6">
         <IdleCounter
           baseCurrency={cur}
-          incomeLastMonth={data.idle.incomeLastMonth}
-          expenseLastMonth={data.idle.expenseLastMonth}
+          incomeMonthlyAvg={data.idle.incomeMonthlyAvg}
+          expenseMonthlyAvg={data.idle.expenseMonthlyAvg}
+          monthsInAvg={data.idle.monthsInAvg}
           monthStartIso={data.idle.monthStartIso}
           monthEndIso={data.idle.monthEndIso}
           incomeRealMTD={data.idle.incomeRealMTD}
